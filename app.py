@@ -2,7 +2,6 @@ import streamlit as st
 import streamlit.components.v1 as components
 from gtts import gTTS
 import io
-from pydub import AudioSegment
 
 # 페이지 설정
 st.set_page_config(
@@ -132,7 +131,7 @@ with tab1:
             if text_input.strip():
                 with st.spinner("음성을 생성하는 중..."):
                     try:
-                        # gTTS로 음성 생성
+                        # gTTS로 음성 생성 (속도는 slow 옵션만 사용)
                         tts = gTTS(text=text_input, lang=lang_code[language], slow=(speed < 0.8))
 
                         # 메모리에 저장
@@ -143,21 +142,11 @@ with tab1:
                         # 오디오 플레이어로 재생
                         audio_bytes = fp.read()
 
-                        # 속도 조절을 위한 처리
+                        st.audio(audio_bytes, format='audio/mp3', autoplay=True)
+
                         if speed != 1.0:
-                            audio = AudioSegment.from_mp3(io.BytesIO(audio_bytes))
-                            # 속도 조절
-                            audio = audio._spawn(audio.raw_data, overrides={
-                                "frame_rate": int(audio.frame_rate * speed)
-                            })
-                            audio = audio.set_frame_rate(audio.frame_rate)
+                            st.info(f"💡 현재 속도: {speed}배 (브라우저 재생 속도는 1배로 고정됩니다)")
 
-                            # 다시 바이트로 변환
-                            fp_out = io.BytesIO()
-                            audio.export(fp_out, format="mp3")
-                            audio_bytes = fp_out.getvalue()
-
-                        st.audio(audio_bytes, format='audio/mp3')
                         st.success("✅ 재생이 완료되었습니다!")
 
                     except Exception as e:
