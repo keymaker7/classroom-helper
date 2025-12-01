@@ -1,14 +1,8 @@
 import streamlit as st
-import pyttsx3
-import sounddevice as sd
-import numpy as np
-import threading
-import time
+import streamlit.components.v1 as components
 from gtts import gTTS
 import io
 from pydub import AudioSegment
-from pydub.playback import play
-import base64
 
 # 페이지 설정
 st.set_page_config(
@@ -79,16 +73,6 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# 세션 상태 초기화
-if 'noise_monitoring' not in st.session_state:
-    st.session_state.noise_monitoring = False
-if 'current_db' not in st.session_state:
-    st.session_state.current_db = 0
-if 'max_db' not in st.session_state:
-    st.session_state.max_db = 0
-if 'noise_history' not in st.session_state:
-    st.session_state.noise_history = []
-
 # 헤더
 st.markdown('<h1 class="main-header">🎓 교실 도우미</h1>', unsafe_allow_html=True)
 st.markdown('<p style="text-align: center; font-size: 1.2rem; color: #666;">텍스트 읽기 & 우리반 소음 측정기</p>', unsafe_allow_html=True)
@@ -137,16 +121,6 @@ with tab1:
             value=1.0,
             step=0.1,
             key="speed"
-        )
-
-        pitch_adjustment = st.slider(
-            "음높이 (피치)",
-            min_value=-10,
-            max_value=10,
-            value=0,
-            step=1,
-            key="pitch",
-            help="양수: 높은 목소리, 음수: 낮은 목소리"
         )
 
     st.markdown("---")
@@ -239,144 +213,247 @@ with tab2:
     st.markdown("### 🎤 우리 반 소음을 실시간으로 측정합니다")
     st.markdown('</div>', unsafe_allow_html=True)
 
-    # 소음 측정 함수
-    def calculate_db(audio_data):
-        """오디오 데이터에서 데시벨 계산"""
-        if len(audio_data) == 0:
-            return 0
+    st.info("💡 **브라우저에서 마이크 권한을 허용해주세요!**")
 
-        # RMS (Root Mean Square) 계산
-        rms = np.sqrt(np.mean(audio_data**2))
+    # JavaScript를 사용한 웹 오디오 API 기반 소음 측정기
+    noise_meter_html = """
+    <div id="noise-meter-container">
+        <div style="text-align: center; margin: 20px 0;">
+            <button id="startBtn" onclick="startMonitoring()" style="
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                color: white;
+                font-size: 1.2rem;
+                padding: 1rem 2rem;
+                border-radius: 10px;
+                border: none;
+                font-weight: bold;
+                cursor: pointer;
+                margin: 5px;
+            ">🎙️ 측정 시작</button>
 
-        # 데시벨 변환 (참조값 기반)
-        if rms > 0:
-            db = 20 * np.log10(rms) + 94  # 94는 보정값
-            return max(0, min(120, db))  # 0-120 dB 범위로 제한
-        return 0
+            <button id="stopBtn" onclick="stopMonitoring()" style="
+                background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+                color: white;
+                font-size: 1.2rem;
+                padding: 1rem 2rem;
+                border-radius: 10px;
+                border: none;
+                font-weight: bold;
+                cursor: pointer;
+                margin: 5px;
+                display: none;
+            ">⏸️ 측정 중지</button>
+        </div>
 
-    def monitor_noise():
-        """소음을 지속적으로 모니터링"""
-        duration = 0.5  # 0.5초마다 측정
-        sample_rate = 44100
+        <div id="noise-display" style="
+            font-size: 4rem;
+            font-weight: bold;
+            text-align: center;
+            padding: 2rem;
+            border-radius: 15px;
+            margin: 1rem 0;
+            background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
+            color: white;
+        ">
+            🟢 0 dB<br><small style="font-size: 1.5rem;">😊 조용함</small>
+        </div>
 
-        while st.session_state.noise_monitoring:
-            try:
-                # 마이크로 녹음
-                audio = sd.rec(int(duration * sample_rate),
-                             samplerate=sample_rate,
-                             channels=1,
-                             dtype='float32')
-                sd.wait()
+        <div style="display: flex; justify-content: space-around; margin: 20px 0;">
+            <div style="text-align: center;">
+                <div style="font-size: 0.9rem; color: #666;">현재 소음</div>
+                <div id="current-db" style="font-size: 2rem; font-weight: bold;">0 dB</div>
+            </div>
+            <div style="text-align: center;">
+                <div style="font-size: 0.9rem; color: #666;">최대 소음</div>
+                <div id="max-db" style="font-size: 2rem; font-weight: bold;">0 dB</div>
+            </div>
+            <div style="text-align: center;">
+                <div style="font-size: 0.9rem; color: #666;">평균 소음</div>
+                <div id="avg-db" style="font-size: 2rem; font-weight: bold;">0 dB</div>
+            </div>
+        </div>
 
-                # 데시벨 계산
-                db = calculate_db(audio.flatten())
+        <canvas id="waveform" width="800" height="100" style="width: 100%; background: #f0f0f0; border-radius: 10px; margin: 20px 0;"></canvas>
+    </div>
 
-                # 세션 상태 업데이트
-                st.session_state.current_db = round(db, 1)
-                st.session_state.max_db = max(st.session_state.max_db, st.session_state.current_db)
+    <script>
+        let audioContext;
+        let analyser;
+        let microphone;
+        let dataArray;
+        let animationId;
+        let isMonitoring = false;
+        let maxDb = 0;
+        let dbHistory = [];
 
-                # 히스토리 저장 (최근 50개)
-                st.session_state.noise_history.append(st.session_state.current_db)
-                if len(st.session_state.noise_history) > 50:
-                    st.session_state.noise_history.pop(0)
+        async function startMonitoring() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
 
-                time.sleep(0.1)
+                audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                analyser = audioContext.createAnalyser();
+                microphone = audioContext.createMediaStreamSource(stream);
 
-            except Exception as e:
-                st.session_state.noise_monitoring = False
-                break
+                analyser.fftSize = 256;
+                const bufferLength = analyser.frequencyBinCount;
+                dataArray = new Uint8Array(bufferLength);
 
-    # 컨트롤 버튼
-    col1, col2, col3 = st.columns(3)
+                microphone.connect(analyser);
 
-    with col1:
-        if st.button("🎙️ 측정 시작", key="start_monitoring", disabled=st.session_state.noise_monitoring, use_container_width=True):
-            st.session_state.noise_monitoring = True
-            st.session_state.max_db = 0
-            st.session_state.noise_history = []
+                document.getElementById('startBtn').style.display = 'none';
+                document.getElementById('stopBtn').style.display = 'inline-block';
 
-            # 백그라운드 스레드에서 모니터링 시작
-            thread = threading.Thread(target=monitor_noise, daemon=True)
-            thread.start()
-            st.rerun()
+                isMonitoring = true;
+                maxDb = 0;
+                dbHistory = [];
 
-    with col2:
-        if st.button("⏸️ 측정 중지", key="stop_monitoring", disabled=not st.session_state.noise_monitoring, use_container_width=True):
-            st.session_state.noise_monitoring = False
-            st.rerun()
+                updateNoiseMeter();
+            } catch (err) {
+                alert('마이크 접근 권한이 필요합니다: ' + err.message);
+            }
+        }
 
-    with col3:
-        if st.button("🔄 초기화", key="reset_monitoring", use_container_width=True):
-            st.session_state.noise_monitoring = False
-            st.session_state.current_db = 0
-            st.session_state.max_db = 0
-            st.session_state.noise_history = []
-            st.rerun()
+        function stopMonitoring() {
+            isMonitoring = false;
 
-    st.markdown("---")
+            if (animationId) {
+                cancelAnimationFrame(animationId);
+            }
 
-    # 현재 소음 레벨 표시
-    current_db = st.session_state.current_db
+            if (microphone) {
+                microphone.disconnect();
+            }
 
-    # 소음 레벨에 따른 클래스 결정
-    if current_db < 50:
-        level_class = "safe"
-        status = "😊 조용함"
-        emoji = "🟢"
-    elif current_db < 70:
-        level_class = "warning"
-        status = "😐 보통"
-        emoji = "🟡"
-    else:
-        level_class = "danger"
-        status = "😱 시끄러움!"
-        emoji = "🔴"
+            if (audioContext) {
+                audioContext.close();
+            }
 
-    st.markdown(f'<div class="noise-level {level_class}">{emoji} {current_db} dB<br><small>{status}</small></div>', unsafe_allow_html=True)
+            document.getElementById('startBtn').style.display = 'inline-block';
+            document.getElementById('stopBtn').style.display = 'none';
+        }
 
-    # 통계 정보
-    col1, col2, col3 = st.columns(3)
+        function updateNoiseMeter() {
+            if (!isMonitoring) return;
 
-    with col1:
-        st.metric("현재 소음", f"{current_db} dB", delta=None)
+            analyser.getByteFrequencyData(dataArray);
 
-    with col2:
-        st.metric("최대 소음", f"{st.session_state.max_db} dB", delta=None)
+            // 평균 볼륨 계산
+            let sum = 0;
+            for (let i = 0; i < dataArray.length; i++) {
+                sum += dataArray[i];
+            }
+            const average = sum / dataArray.length;
 
-    with col3:
-        avg_db = round(np.mean(st.session_state.noise_history), 1) if st.session_state.noise_history else 0
-        st.metric("평균 소음", f"{avg_db} dB", delta=None)
+            // 데시벨로 변환 (0-100 범위를 0-100 dB로 매핑)
+            const db = Math.round(average);
 
-    # 실시간 그래프
-    if st.session_state.noise_history:
-        st.markdown("### 📈 실시간 소음 그래프")
-        st.line_chart(st.session_state.noise_history, use_container_width=True)
+            // 최대값 업데이트
+            if (db > maxDb) {
+                maxDb = db;
+            }
 
-    # 소음 기준 안내
+            // 히스토리 저장
+            dbHistory.push(db);
+            if (dbHistory.length > 50) {
+                dbHistory.shift();
+            }
+
+            // 평균 계산
+            const avgDb = Math.round(dbHistory.reduce((a, b) => a + b, 0) / dbHistory.length);
+
+            // UI 업데이트
+            updateDisplay(db, maxDb, avgDb);
+
+            // 파형 그리기
+            drawWaveform();
+
+            animationId = requestAnimationFrame(updateNoiseMeter);
+        }
+
+        function updateDisplay(current, max, avg) {
+            let color, emoji, status;
+
+            if (current < 30) {
+                color = 'linear-gradient(135deg, #11998e 0%, #38ef7d 100%)';
+                emoji = '🟢';
+                status = '😊 조용함';
+            } else if (current < 60) {
+                color = 'linear-gradient(135deg, #f093fb 0%, #f5576c 100%)';
+                emoji = '🟡';
+                status = '😐 보통';
+            } else {
+                color = 'linear-gradient(135deg, #fa709a 0%, #fee140 100%)';
+                emoji = '🔴';
+                status = '😱 시끄러움!';
+            }
+
+            const display = document.getElementById('noise-display');
+            display.style.background = color;
+            display.innerHTML = `${emoji} ${current} dB<br><small style="font-size: 1.5rem;">${status}</small>`;
+
+            document.getElementById('current-db').textContent = current + ' dB';
+            document.getElementById('max-db').textContent = max + ' dB';
+            document.getElementById('avg-db').textContent = avg + ' dB';
+        }
+
+        function drawWaveform() {
+            const canvas = document.getElementById('waveform');
+            const canvasCtx = canvas.getContext('2d');
+            const WIDTH = canvas.width;
+            const HEIGHT = canvas.height;
+
+            analyser.getByteTimeDomainData(dataArray);
+
+            canvasCtx.fillStyle = '#f0f0f0';
+            canvasCtx.fillRect(0, 0, WIDTH, HEIGHT);
+
+            canvasCtx.lineWidth = 2;
+            canvasCtx.strokeStyle = '#667eea';
+            canvasCtx.beginPath();
+
+            const sliceWidth = WIDTH / dataArray.length;
+            let x = 0;
+
+            for (let i = 0; i < dataArray.length; i++) {
+                const v = dataArray[i] / 128.0;
+                const y = v * HEIGHT / 2;
+
+                if (i === 0) {
+                    canvasCtx.moveTo(x, y);
+                } else {
+                    canvasCtx.lineTo(x, y);
+                }
+
+                x += sliceWidth;
+            }
+
+            canvasCtx.lineTo(WIDTH, HEIGHT / 2);
+            canvasCtx.stroke();
+        }
+    </script>
+    """
+
+    components.html(noise_meter_html, height=600)
+
     st.markdown("---")
     st.markdown("### 📖 소음 기준 안내")
 
     col1, col2, col3 = st.columns(3)
 
     with col1:
-        st.info("🟢 **0-50 dB**\n\n조용한 상태\n\n(도서관, 조용한 교실)")
+        st.info("🟢 **0-30 dB**\n\n조용한 상태\n\n(도서관, 조용한 교실)")
 
     with col2:
-        st.warning("🟡 **50-70 dB**\n\n보통 상태\n\n(일반 대화, 활동 시간)")
+        st.warning("🟡 **30-60 dB**\n\n보통 상태\n\n(일반 대화, 활동 시간)")
 
     with col3:
-        st.error("🔴 **70+ dB**\n\n시끄러운 상태\n\n(큰 소리, 소란)")
-
-    # 자동 새로고침 (측정 중일 때만)
-    if st.session_state.noise_monitoring:
-        time.sleep(0.5)
-        st.rerun()
+        st.error("🔴 **60+ dB**\n\n시끄러운 상태\n\n(큰 소리, 소란)")
 
 # 푸터
 st.markdown("---")
 st.markdown("""
 <div style='text-align: center; color: #666; padding: 2rem;'>
-    <p style='font-size: 0.9rem;'>🎓 교실 도우미 v1.0 | Made with ❤️ for Teachers</p>
-    <p style='font-size: 0.8rem;'>💡 TIP: 소음 측정은 마이크 권한이 필요합니다</p>
+    <p style='font-size: 0.9rem;'>🎓 교실 도우미 v1.1 | Made with ❤️ for Teachers</p>
+    <p style='font-size: 0.8rem;'>💡 TIP: 소음 측정은 브라우저의 마이크 권한이 필요합니다</p>
 </div>
 """, unsafe_allow_html=True)
